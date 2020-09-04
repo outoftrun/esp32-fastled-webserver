@@ -69,17 +69,17 @@ unsigned long paletteTimeout = 0;
 
 #define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
-#define DATA_PIN    12
+#define DATA_PIN 12
 //#define CLK_PIN   4
-#define LED_TYPE    WS2812B
+#define LED_TYPE WS2812B
 #define COLOR_ORDER RGB
-#define NUM_STRIPS  8
+#define NUM_STRIPS 8
 #define NUM_LEDS_PER_STRIP 100
-#define NUM_LEDS NUM_LEDS_PER_STRIP * NUM_STRIPS
+#define NUM_LEDS NUM_LEDS_PER_STRIP *NUM_STRIPS
 CRGB leds[NUM_LEDS];
 
-#define MILLI_AMPS         4000 // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
-#define FRAMES_PER_SECOND  120
+#define MILLI_AMPS 4000 // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
+#define FRAMES_PER_SECOND 120
 
 #include "patterns.h"
 
@@ -90,34 +90,125 @@ CRGB leds[NUM_LEDS];
 #include "wifi.h"
 #include "web.h"
 
-// wifi ssid and password should be added to a file in the sketch named secrets.h
-// the secrets.h file should be added to the .gitignore file and never committed or
-// pushed to public source control (GitHub).
-// const char* ssid = "........";
-// const char* password = "........";
+struct params_t
+{
+  uint32_t from;
+  uint32_t to;
+};
 
-void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
+const uint32_t ARRAY_SIZE = 1024 * 64;
+
+uint8_t array[ARRAY_SIZE];
+SemaphoreHandle_t semaphore;
+
+uint8_t RTC_DATA_ATTR tasks = 0;
+
+static void taskProducer(void *pvParam)
+{
+  for (uint32_t i = ((params_t *)pvParam)->from; i < ((params_t *)pvParam)->to; ++i)
+  {
+    array[i] = random(256);
+  }
+  xSemaphoreGive(semaphore);
+  vTaskDelete(NULL);
+}
+
+static void halt(const char *msg)
+{
+  Serial.println(msg);
+  Serial.println("System halted!");
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+static void nextPattern()
+{
+  // add one to the current pattern number, and wrap around at the end
+  currentPatternIndex = (currentPatternIndex + 1) % patternCount;
+}
+
+static void nextPalette()
+{
+  currentPaletteIndex = (currentPaletteIndex + 1) % paletteCount;
+  targetPalette = palettes[currentPaletteIndex];
+}
+
+void setup_tasks()
+{
+
+  if (!tasks)
+    tasks = 1;
+  else
+    tasks *= 2;
+
+  if (tasks == 1)
+    semaphore = xSemaphoreCreateBinary();
+  else
+    semaphore = xSemaphoreCreateCounting(tasks, 0);
+  if (!semaphore)
+    halt("Error creating semaphore!");
+
+  Serial.printf("*** Creating %u task(s) ***\r\n", tasks);
+
+  uint32_t time = micros();
+
+  for (uint8_t i = 0; i < tasks; ++i)
+  {
+    params_t params;
+
+    params.from = ARRAY_SIZE / tasks * i;
+    params.to = params.from + ARRAY_SIZE / tasks;
+    if (xTaskCreatePinnedToCore(&taskProducer, "producer", 1024, &params, 1, NULL, i & 0x01) != pdPASS)
+      halt("Error creating task!");
+    //    Serial.printf("Task #%u (%u .. %u)\r\n", i, params.from, params.to - 1);
+  }
+
+  for (uint8_t i = 0; i < tasks; ++i)
+  {
+    xSemaphoreTake(semaphore, portMAX_DELAY);
+  }
+  time = micros() - time;
+  Serial.printf("Execution time: %u us.\r\n", time);
+  Serial.flush();
+  if (tasks >= 8)
+    esp_deep_sleep_start();
+  else
+  {
+    esp_deep_sleep_disable_rom_logging();
+    esp_deep_sleep(0);
+  }
+}
+
+
+static void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
+{
   Serial.printf("Listing directory: %s\n", dirname);
 
   File root = fs.open(dirname);
-  if (!root) {
+  if (!root)
+  {
     Serial.println("Failed to open directory");
     return;
   }
-  if (!root.isDirectory()) {
+  if (!root.isDirectory())
+  {
     Serial.println("Not a directory");
     return;
   }
 
   File file = root.openNextFile();
-  while (file) {
-    if (file.isDirectory()) {
+  while (file)
+  {
+    if (file.isDirectory())
+    {
       Serial.print("  DIR : ");
       Serial.println(file.name());
-      if (levels) {
+      if (levels)
+      {
         listDir(fs, file.name(), levels - 1);
       }
-    } else {
+    }
+    else
+    {
       Serial.print("  FILE: ");
       Serial.print(file.name());
       Serial.print("  SIZE: ");
@@ -127,17 +218,18 @@ void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
   }
 }
 
-void setup() {
+void setup()
+{
   pinMode(led, OUTPUT);
   digitalWrite(led, 1);
 
   //  delay(3000); // 3 second delay for recovery
   Serial.begin(115200);
-
+  setup_tasks();
   SPIFFS.begin();
   listDir(SPIFFS, "/", 1);
 
-//  loadFieldsFromEEPROM(fields, fieldCount);
+  //  loadFieldsFromEEPROM(fields, fieldCount);
 
   setupWifi();
   setupWeb();
@@ -159,7 +251,7 @@ void setup() {
   FastLED.addLeds<LED_TYPE, SCL, COLOR_ORDER>(leds, 7 * NUM_LEDS_PER_STRIP, NUM_LEDS_PER_STRIP).setCorrection(TypicalLEDStrip);
 
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MILLI_AMPS);
-  
+
   // set master brightness control
   FastLED.setBrightness(brightness);
 
@@ -170,25 +262,30 @@ void loop()
 {
   handleWeb();
 
-  if (power == 0) {
+  if (power == 0)
+  {
     fill_solid(leds, NUM_LEDS, CRGB::Black);
   }
-  else {
+  else
+  {
     // Call the current pattern function once, updating the 'leds' array
     patterns[currentPatternIndex].pattern();
 
-    EVERY_N_MILLISECONDS(40) {
+    EVERY_N_MILLISECONDS(40)
+    {
       // slowly blend the current palette to the next
       nblendPaletteTowardPalette(currentPalette, targetPalette, 8);
-      gHue++;  // slowly cycle the "base color" through the rainbow
+      gHue++; // slowly cycle the "base color" through the rainbow
     }
 
-    if (autoplay == 1 && (millis() > autoPlayTimeout)) {
+    if (autoplay == 1 && (millis() > autoPlayTimeout))
+    {
       nextPattern();
       autoPlayTimeout = millis() + (autoplayDuration * 1000);
     }
 
-    if (cyclePalettes == 1 && (millis() > paletteTimeout)) {
+    if (cyclePalettes == 1 && (millis() > paletteTimeout))
+    {
       nextPalette();
       paletteTimeout = millis() + (paletteDuration * 1000);
     }
@@ -196,20 +293,8 @@ void loop()
 
   // send the 'leds' array out to the actual LED strip
   FastLED.show();
-  
+
   // insert a delay to keep the framerate modest
   // FastLED.delay(1000 / FRAMES_PER_SECOND);
   delay(1000 / FRAMES_PER_SECOND);
-}
-
-void nextPattern()
-{
-  // add one to the current pattern number, and wrap around at the end
-  currentPatternIndex = (currentPatternIndex + 1) % patternCount;
-}
-
-void nextPalette()
-{
-  currentPaletteIndex = (currentPaletteIndex + 1) % paletteCount;
-  targetPalette = palettes[currentPaletteIndex];
 }
