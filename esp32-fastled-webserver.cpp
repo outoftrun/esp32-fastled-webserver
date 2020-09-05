@@ -28,7 +28,7 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <EEPROM.h>
-
+#include <time.h>
 #if defined(FASTLED_VERSION) && (FASTLED_VERSION < 3003000)
 #warning "Requires FastLED 3.3 or later; check github for latest code."
 #endif
@@ -90,36 +90,8 @@ CRGB leds[NUM_LEDS];
 #include "wifi.h"
 #include "web.h"
 
-struct params_t
-{
-  uint32_t from;
-  uint32_t to;
-};
+extern void setup_tasks();
 
-const uint32_t ARRAY_SIZE = 1024 * 64;
-
-uint8_t array[ARRAY_SIZE];
-SemaphoreHandle_t semaphore;
-
-uint8_t RTC_DATA_ATTR tasks = 0;
-
-static void taskProducer(void *pvParam)
-{
-  for (uint32_t i = ((params_t *)pvParam)->from; i < ((params_t *)pvParam)->to; ++i)
-  {
-    array[i] = random(256);
-  }
-  xSemaphoreGive(semaphore);
-  vTaskDelete(NULL);
-}
-
-static void halt(const char *msg)
-{
-  Serial.println(msg);
-  Serial.println("System halted!");
-  Serial.flush();
-  esp_deep_sleep_start();
-}
 static void nextPattern()
 {
   // add one to the current pattern number, and wrap around at the end
@@ -132,51 +104,6 @@ static void nextPalette()
   targetPalette = palettes[currentPaletteIndex];
 }
 
-void setup_tasks()
-{
-
-  if (!tasks)
-    tasks = 1;
-  else
-    tasks *= 2;
-
-  if (tasks == 1)
-    semaphore = xSemaphoreCreateBinary();
-  else
-    semaphore = xSemaphoreCreateCounting(tasks, 0);
-  if (!semaphore)
-    halt("Error creating semaphore!");
-
-  Serial.printf("*** Creating %u task(s) ***\r\n", tasks);
-
-  uint32_t time = micros();
-
-  for (uint8_t i = 0; i < tasks; ++i)
-  {
-    params_t params;
-
-    params.from = ARRAY_SIZE / tasks * i;
-    params.to = params.from + ARRAY_SIZE / tasks;
-    if (xTaskCreatePinnedToCore(&taskProducer, "producer", 1024, &params, 1, NULL, i & 0x01) != pdPASS)
-      halt("Error creating task!");
-    //    Serial.printf("Task #%u (%u .. %u)\r\n", i, params.from, params.to - 1);
-  }
-
-  for (uint8_t i = 0; i < tasks; ++i)
-  {
-    xSemaphoreTake(semaphore, portMAX_DELAY);
-  }
-  time = micros() - time;
-  Serial.printf("Execution time: %u us.\r\n", time);
-  Serial.flush();
-  if (tasks >= 8)
-    esp_deep_sleep_start();
-  else
-  {
-    esp_deep_sleep_disable_rom_logging();
-    esp_deep_sleep(0);
-  }
-}
 
 
 static void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
@@ -218,6 +145,22 @@ static void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
   }
 }
 
+void setTime()
+{
+  configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 0);
+  while (time(nullptr) <= 100000)
+  {
+    Serial.print(".");
+    delay(100);
+  }
+  Serial.print("\n");
+  time_t now = time(nullptr);
+  Serial.println(ctime(&now));
+  autoPlayTimeout = millis() + (autoplayDuration * 1000);
+}
+
 void setup()
 {
   pinMode(led, OUTPUT);
@@ -225,7 +168,7 @@ void setup()
 
   //  delay(3000); // 3 second delay for recovery
   Serial.begin(115200);
-  setup_tasks();
+ // setup_tasks();
   SPIFFS.begin();
   listDir(SPIFFS, "/", 1);
 
@@ -256,6 +199,7 @@ void setup()
   FastLED.setBrightness(brightness);
 
   autoPlayTimeout = millis() + (autoplayDuration * 1000);
+  setTime();
 }
 
 void loop()
